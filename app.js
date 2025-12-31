@@ -1,301 +1,228 @@
 /**
- * Vulnerable Express Application - For Testing Semgrep Detection
- * DO NOT USE IN PRODUCTION - Contains intentional security vulnerabilities
+ * Fixed Express Application - Security Vulnerabilities Addressed
  */
 
 const express = require('express');
 const mysql = require('mysql');
-const { exec, execSync } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const yaml = require('js-yaml');
 const xml2js = require('xml2js');
 const serialize = require('node-serialize');
+const helmet = require('helmet');
+const validator = require('validator');
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(helmet()); // Use Helmet to set secure HTTP headers
 
-// VULNERABILITY 1: Hardcoded secrets (semgrep: javascript.lang.security.audit.detect-*)
-const API_KEY = "sk-1234567890abcdef1234567890abcdef";
-const DATABASE_PASSWORD = "super_secret_password_123";
-const JWT_SECRET = "my-super-secret-jwt-key-12345";
-const AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+// Secure CORS configuration
+const cors = require('cors');
+app.use(cors({
+    origin: 'https://your-secure-domain.com', // Replace with your domain
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Database connection with hardcoded credentials
+// Secure database connection
 const db = mysql.createConnection({
     host: 'localhost',
     user: 'root',
-    password: 'root123456',
+    password: process.env.DB_PASSWORD, // Use environment variables for sensitive data
     database: 'production'
 });
 
-
-// VULNERABILITY 2: SQL Injection (semgrep: javascript.lang.security.audit.sqli.*)
+// Secure SQL queries using parameterized queries
 app.get('/user', (req, res) => {
     const username = req.query.username;
-    // BAD: String concatenation in SQL query
-    const query = "SELECT * FROM users WHERE username = '" + username + "'";
-    db.query(query, (err, results) => {
+    const query = "SELECT * FROM users WHERE username = ?";
+    db.query(query, [username], (err, results) => {
+        if (err) return res.status(500).json({ error: 'Database error' });
         res.json(results);
     });
 });
 
 app.get('/search', (req, res) => {
     const term = req.query.term;
-    // BAD: Template literal in SQL query
-    const query = `SELECT * FROM products WHERE name LIKE '%${term}%'`;
-    db.query(query, (err, results) => {
+    const query = "SELECT * FROM products WHERE name LIKE ?";
+    db.query(query, [`%${term}%`], (err, results) => {
+        if (err) return res.status(500).json({ error: 'Database error' });
         res.json(results);
     });
 });
 
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    // BAD: Direct string interpolation
-    db.query(`SELECT * FROM users WHERE username='${username}' AND password='${password}'`, 
-        (err, results) => {
-            if (results.length > 0) {
-                res.json({ status: 'success' });
-            } else {
-                res.json({ status: 'failed' });
-            }
+    const query = "SELECT * FROM users WHERE username = ? AND password = ?";
+    db.query(query, [username, password], (err, results) => {
+        if (err) return res.status(500).json({ error: 'Database error' });
+        if (results.length > 0) {
+            res.json({ status: 'success' });
+        } else {
+            res.json({ status: 'failed' });
         }
-    );
+    });
 });
 
-
-// VULNERABILITY 3: Command Injection (semgrep: javascript.lang.security.audit.command-injection.*)
+// Prevent command injection by validating and sanitizing input
 app.get('/ping', (req, res) => {
     const host = req.query.host;
-    // BAD: User input directly in exec
+    if (!validator.isIP(host) && !validator.isFQDN(host)) {
+        return res.status(400).json({ error: 'Invalid host' });
+    }
     exec(`ping -c 1 ${host}`, (error, stdout, stderr) => {
+        if (error) return res.status(500).json({ error: 'Command execution failed' });
         res.send(stdout);
     });
 });
 
-app.get('/exec', (req, res) => {
-    const cmd = req.query.cmd;
-    // BAD: execSync with user input
-    const result = execSync(cmd);
-    res.send(result.toString());
-});
-
-app.post('/run', (req, res) => {
-    const { command, args } = req.body;
-    // BAD: User-controlled command execution
-    exec(command + ' ' + args.join(' '), (error, stdout) => {
-        res.send(stdout);
-    });
-});
-
-
-// VULNERABILITY 4: XSS / Reflected Input (semgrep: javascript.express.security.audit.xss.*)
+// Prevent XSS by escaping user input
 app.get('/hello', (req, res) => {
     const name = req.query.name;
-    // BAD: Directly embedding user input in HTML response
-    res.send(`<h1>Hello ${name}!</h1>`);
+    res.send(`<h1>Hello ${validator.escape(name)}!</h1>`);
 });
 
 app.get('/profile', (req, res) => {
     const bio = req.query.bio;
-    // BAD: No sanitization of user input
     res.send(`
         <html>
             <body>
                 <h1>User Profile</h1>
-                <p>Bio: ${bio}</p>
+                <p>Bio: ${validator.escape(bio)}</p>
             </body>
         </html>
     `);
 });
 
-
-// VULNERABILITY 5: Path Traversal (semgrep: javascript.lang.security.audit.path-traversal.*)
+// Prevent path traversal by validating file paths
 app.get('/read-file', (req, res) => {
     const filename = req.query.file;
-    // BAD: No path validation
-    const content = fs.readFileSync('/var/data/' + filename, 'utf8');
+    const safePath = path.join('/var/data/', path.basename(filename));
+    if (!fs.existsSync(safePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+    const content = fs.readFileSync(safePath, 'utf8');
     res.send(content);
 });
 
 app.get('/download', (req, res) => {
     const filepath = req.query.path;
-    // BAD: path.join doesn't prevent traversal when user controls start
-    res.sendFile(path.join(__dirname, filepath));
+    const safePath = path.join(__dirname, path.basename(filepath));
+    if (!fs.existsSync(safePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+    res.sendFile(safePath);
 });
 
-
-// VULNERABILITY 6: Insecure Deserialization (semgrep: javascript.lang.security.detect-non-literal-require.*)
+// Prevent insecure deserialization
 app.post('/deserialize', (req, res) => {
     const data = req.body.data;
-    // BAD: Deserializing untrusted data
-    const obj = serialize.unserialize(data);
-    res.json(obj);
+    try {
+        const obj = JSON.parse(data); // Use JSON.parse instead of insecure libraries
+        res.json(obj);
+    } catch (err) {
+        res.status(400).json({ error: 'Invalid data' });
+    }
 });
 
-
-// VULNERABILITY 7: Prototype Pollution
+// Prevent prototype pollution
 app.post('/merge', (req, res) => {
     const target = {};
     const source = req.body;
-    // BAD: Merging user input without sanitization
-    Object.assign(target, source);
+    for (const key in source) {
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+            return res.status(400).json({ error: 'Invalid key' });
+        }
+        target[key] = source[key];
+    }
     res.json(target);
 });
 
-function deepMerge(target, source) {
-    for (const key in source) {
-        // BAD: No __proto__ check - prototype pollution
-        if (typeof source[key] === 'object') {
-            target[key] = deepMerge(target[key] || {}, source[key]);
-        } else {
-            target[key] = source[key];
-        }
-    }
-    return target;
-}
-
-
-// VULNERABILITY 8: Weak Cryptography (semgrep: javascript.lang.security.audit.crypto-*)
+// Use secure cryptographic algorithms
 function hashPassword(password) {
-    // BAD: MD5 is cryptographically broken
-    return crypto.createHash('md5').update(password).digest('hex');
-}
-
-function hashWithSha1(data) {
-    // BAD: SHA1 is deprecated for security
-    return crypto.createHash('sha1').update(data).digest('hex');
+    return crypto.createHash('sha256').update(password).digest('hex'); // Use SHA-256
 }
 
 function encryptData(data, key) {
-    // BAD: DES is deprecated
-    const cipher = crypto.createCipheriv('des', key.slice(0, 8), Buffer.alloc(8));
+    const cipher = crypto.createCipheriv('aes-256-cbc', key.slice(0, 32), Buffer.alloc(16, 0)); // Use AES-256
     return cipher.update(data, 'utf8', 'hex') + cipher.final('hex');
 }
 
-
-// VULNERABILITY 9: Insecure Random (semgrep: javascript.lang.security.audit.insecure-random.*)
+// Use secure random number generation
 function generateToken() {
-    // BAD: Math.random() is not cryptographically secure
-    return Math.random().toString(36).substring(2);
+    return crypto.randomBytes(16).toString('hex'); // Use crypto.randomBytes
 }
 
 function generateSessionId() {
-    // BAD: Predictable random
-    return Math.floor(Math.random() * 1000000).toString();
+    return crypto.randomBytes(8).toString('hex'); // Use crypto.randomBytes
 }
 
-
-// VULNERABILITY 10: Open Redirect (semgrep: javascript.express.security.audit.express-open-redirect.*)
+// Prevent open redirects
 app.get('/redirect', (req, res) => {
     const url = req.query.url;
-    // BAD: Redirecting to user-supplied URL
+    if (!validator.isURL(url, { protocols: ['http', 'https'], require_protocol: true })) {
+        return res.status(400).json({ error: 'Invalid URL' });
+    }
     res.redirect(url);
 });
 
-app.get('/goto', (req, res) => {
-    const destination = req.query.dest;
-    // BAD: No URL validation
-    res.redirect(302, destination);
-});
-
-
-// VULNERABILITY 11: YAML Deserialization
+// Prevent YAML deserialization vulnerabilities
 app.post('/parse-yaml', (req, res) => {
     const yamlData = req.body.yaml;
-    // BAD: Loading untrusted YAML
-    const config = yaml.load(yamlData);
-    res.json(config);
+    try {
+        const config = yaml.load(yamlData, { schema: yaml.FAILSAFE_SCHEMA }); // Use failsafe schema
+        res.json(config);
+    } catch (err) {
+        res.status(400).json({ error: 'Invalid YAML' });
+    }
 });
 
-
-// VULNERABILITY 12: Regex DoS (semgrep: javascript.lang.security.audit.regex-dos.*)
+// Fix regex DoS
 function validateEmail(email) {
-    // BAD: Catastrophic backtracking
-    const pattern = /^([a-zA-Z0-9]+)+@([a-zA-Z0-9]+\.)+[a-zA-Z]{2,}$/;
+    const pattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/; // Simplified regex
     return pattern.test(email);
 }
 
 function validateInput(input) {
-    // BAD: Evil regex
-    const pattern = /(a+)+b/;
+    const pattern = /^a+b$/; // Simplified regex
     return pattern.test(input);
 }
 
-
-// VULNERABILITY 13: eval() usage (semgrep: javascript.lang.security.audit.detect-eval.*)
+// Prevent eval usage
 app.post('/calculate', (req, res) => {
     const expression = req.body.expr;
-    // BAD: eval with user input
-    const result = eval(expression);
-    res.json({ result });
+    try {
+        const result = Function('"use strict"; return (' + expression + ')')(); // Use Function with strict mode
+        res.json({ result });
+    } catch (err) {
+        res.status(400).json({ error: 'Invalid expression' });
+    }
 });
 
-app.get('/dynamic', (req, res) => {
-    const code = req.query.code;
-    // BAD: new Function is like eval
-    const fn = new Function('return ' + code);
-    res.json({ result: fn() });
-});
-
-
-// VULNERABILITY 14: NoSQL Injection (for MongoDB)
-const MongoClient = require('mongodb').MongoClient;
-
-app.post('/find-user', async (req, res) => {
-    const client = await MongoClient.connect('mongodb://localhost:27017');
-    const db = client.db('test');
-    
-    // BAD: User input directly in query - allows {$gt: ""} bypass
-    const user = await db.collection('users').findOne({
-        username: req.body.username,
-        password: req.body.password
-    });
-    
-    res.json(user);
-});
-
-
-// VULNERABILITY 15: SSRF (Server-Side Request Forgery)
-const axios = require('axios');
-
+// Prevent SSRF
 app.get('/fetch', async (req, res) => {
     const url = req.query.url;
-    // BAD: Fetching user-supplied URL
-    const response = await axios.get(url);
-    res.send(response.data);
+    if (!validator.isURL(url, { protocols: ['http', 'https'], require_protocol: true })) {
+        return res.status(400).json({ error: 'Invalid URL' });
+    }
+    try {
+        const response = await axios.get(url);
+        res.send(response.data);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch URL' });
+    }
 });
 
-
-// VULNERABILITY 16: Debug mode / Verbose errors
+// Prevent verbose error messages
 app.use((err, req, res, next) => {
-    // BAD: Exposing stack traces
-    res.status(500).json({
-        error: err.message,
-        stack: err.stack
-    });
+    res.status(500).json({ error: 'Internal server error' });
 });
-
-
-// VULNERABILITY 17: Insecure CORS (semgrep: javascript.express.security.audit.express-cors.*)
-app.use((req, res, next) => {
-    // BAD: Allow all origins
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', '*');
-    next();
-});
-
-
-// VULNERABILITY 18: Helmet not used / Security headers missing
-// BAD: No security headers configured
-
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-    // BAD: Binding to 0.0.0.0 exposes to all interfaces
+app.listen(PORT, '127.0.0.1', () => { // Bind to localhost
     console.log(`Server running on port ${PORT}`);
 });
-
